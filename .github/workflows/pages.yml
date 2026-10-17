@@ -1,8 +1,13 @@
-name: Publish PWA
+name: Publish personal OpenGym
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'chinheki/openGym source commit or branch (use a SHA to roll back)'
+        required: false
+        default: main
 permissions:
   contents: read
   pages: write
@@ -12,28 +17,46 @@ concurrency:
   cancel-in-progress: false
 jobs:
   deploy:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check application and core behavior
+        with:
+          repository: chinheki/openGym
+          ref: ${{ inputs.source_ref || 'main' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --registry=https://registry.npmjs.org
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: node scripts/catalogue/cardbook.mjs
+      - run: npm run build
+        working-directory: frontend
+        env:
+          VITE_PERSONAL: '1'
+          APP_BUILD: ${{ github.run_number }}
+      - run: node scripts/catalogue/stage-media.mjs frontend/dist
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Check migration and mixed workouts in a browser
         run: |
-          node --check app.js
-          node --check db.js
-          node --check logic.js
-          node --check sw.js
-          node --test tests/logic.test.js
-      - name: Prepare public files only
-        run: |
-          mkdir -p _site/icons
-          cp index.html style.css app.js db.js logic.js sw.js manifest.webmanifest _site/
-          cp icons/*.png _site/icons/
+          python3 -m http.server 4190 --bind 127.0.0.1 --directory frontend > /tmp/cardbook-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          CARDBOOK_TEST_URL=http://127.0.0.1:4190/dist npm --prefix frontend run test:cardbook
+      - name: Record deployed source
+        run: git rev-parse HEAD > frontend/dist/source-revision.txt
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
-      - name: Deploy to GitHub Pages
-        id: deployment
+          path: frontend/dist
+      - id: deployment
         uses: actions/deploy-pages@v4
